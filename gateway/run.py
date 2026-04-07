@@ -402,6 +402,71 @@ def _load_gateway_config() -> dict:
     return {}
 
 
+def _apply_channel_overrides(
+    user_config: dict,
+    chat_id: str,
+    model: str,
+    runtime_kwargs: dict,
+    reasoning_config: dict | None,
+) -> tuple[str, dict, dict | None, dict, bool]:
+    """Apply per-channel config overrides from config.yaml channels section.
+
+    Looks up ``channels.<chat_id>`` in config.yaml and overrides model,
+    provider credentials, and reasoning effort for that channel.
+
+    Returns:
+        (model, runtime_kwargs, reasoning_config, channel_cfg, model_explicitly_set)
+
+    ``channel_cfg`` is the raw dict for the caller to extract system_prompt etc.
+    ``model_explicitly_set`` is True when the channel specifies an explicit model
+    (used to bypass smart model routing).
+    """
+    channel_cfg = (user_config.get("channels") or {}).get(str(chat_id)) or {}
+    if not channel_cfg:
+        return model, runtime_kwargs, reasoning_config, channel_cfg, False
+
+    model_explicitly_set = False
+
+    # Provider override: re-resolve full credentials for the channel's provider
+    if channel_cfg.get("provider"):
+        try:
+            from hermes_cli.runtime_provider import resolve_runtime_provider
+            channel_runtime = resolve_runtime_provider(requested=channel_cfg["provider"])
+            runtime_kwargs = {
+                "api_key": channel_runtime.get("api_key"),
+                "base_url": channel_runtime.get("base_url"),
+                "provider": channel_runtime.get("provider"),
+                "api_mode": channel_runtime.get("api_mode"),
+                "command": channel_runtime.get("command"),
+                "args": list(channel_runtime.get("args") or []),
+                "credential_pool": channel_runtime.get("credential_pool"),
+            }
+        except Exception as exc:
+            logger.warning(
+                "Channel provider '%s' for chat %s failed, using global: %s",
+                channel_cfg["provider"], chat_id, exc,
+            )
+
+    # Model override
+    if channel_cfg.get("model"):
+        model = channel_cfg["model"]
+        model_explicitly_set = True
+
+    # Reasoning override with proper validation
+    if channel_cfg.get("reasoning_effort"):
+        from hermes_constants import parse_reasoning_effort
+        parsed = parse_reasoning_effort(str(channel_cfg["reasoning_effort"]))
+        if parsed is not None:
+            reasoning_config = parsed
+        else:
+            logger.warning(
+                "Invalid channel reasoning_effort '%s' for chat %s, using global",
+                channel_cfg["reasoning_effort"], chat_id,
+            )
+
+    return model, runtime_kwargs, reasoning_config, channel_cfg, model_explicitly_set
+
+
 def _resolve_gateway_model(config: dict | None = None) -> str:
     """Read model from config.yaml — single source of truth.
 
@@ -1303,7 +1368,7 @@ class GatewayRunner:
         Stops retrying a platform after 20 failed attempts or if the error
         is non-retryable (e.g. bad auth token).
         """
-        _MAX_ATTEMPTS = 20
+        _MAX_ATTEMPTS = 999999  # effectively infinite — never give up on retryable errors
         _BACKOFF_CAP = 300  # 5 minutes max between retries
 
         await asyncio.sleep(10)  # initial delay — let startup finish
@@ -3978,7 +4043,34 @@ class GatewayRunner:
             max_iterations = int(os.getenv("HERMES_MAX_ITERATIONS", "90"))
             reasoning_config = self._load_reasoning_config()
             self._reasoning_config = reasoning_config
-            turn_route = self._resolve_turn_agent_config(prompt, model, runtime_kwargs)
+
+            # --- Per-channel overrides for background tasks ---
+            _chat_id_str = str(getattr(source, "chat_id", "") or "")
+            model, runtime_kwargs, reasoning_config, _channel_cfg, _channel_model_set = (
+                _apply_channel_overrides(user_config, _chat_id_str, model, runtime_kwargs, reasoning_config)
+            )
+            if _channel_cfg:
+                self._reasoning_config = reasoning_config
+
+            if _channel_model_set:
+                turn_route = {
+                    "model": model,
+                    "runtime": {
+                        "api_key": runtime_kwargs.get("api_key"),
+                        "base_url": runtime_kwargs.get("base_url"),
+                        "provider": runtime_kwargs.get("provider"),
+                        "api_mode": runtime_kwargs.get("api_mode"),
+                        "command": runtime_kwargs.get("command"),
+                        "args": list(runtime_kwargs.get("args") or []),
+                        "credential_pool": runtime_kwargs.get("credential_pool"),
+                    },
+                    "label": None,
+                    "signature": (model, runtime_kwargs.get("provider"), runtime_kwargs.get("base_url"),
+                                  runtime_kwargs.get("api_mode"), runtime_kwargs.get("command"),
+                                  tuple(runtime_kwargs.get("args") or ())),
+                }
+            else:
+                turn_route = self._resolve_turn_agent_config(prompt, model, runtime_kwargs)
 
             def run_sync():
                 agent = AIAgent(
@@ -4137,7 +4229,32 @@ class GatewayRunner:
             model = _resolve_gateway_model(user_config)
             platform_key = _platform_config_key(source.platform)
             reasoning_config = self._load_reasoning_config()
-            turn_route = self._resolve_turn_agent_config(question, model, runtime_kwargs)
+
+            # --- Per-channel overrides for /btw ---
+            _chat_id_str = str(getattr(source, "chat_id", "") or "")
+            model, runtime_kwargs, reasoning_config, _channel_cfg, _channel_model_set = (
+                _apply_channel_overrides(user_config, _chat_id_str, model, runtime_kwargs, reasoning_config)
+            )
+
+            if _channel_model_set:
+                turn_route = {
+                    "model": model,
+                    "runtime": {
+                        "api_key": runtime_kwargs.get("api_key"),
+                        "base_url": runtime_kwargs.get("base_url"),
+                        "provider": runtime_kwargs.get("provider"),
+                        "api_mode": runtime_kwargs.get("api_mode"),
+                        "command": runtime_kwargs.get("command"),
+                        "args": list(runtime_kwargs.get("args") or []),
+                        "credential_pool": runtime_kwargs.get("credential_pool"),
+                    },
+                    "label": None,
+                    "signature": (model, runtime_kwargs.get("provider"), runtime_kwargs.get("base_url"),
+                                  runtime_kwargs.get("api_mode"), runtime_kwargs.get("command"),
+                                  tuple(runtime_kwargs.get("args") or ())),
+                }
+            else:
+                turn_route = self._resolve_turn_agent_config(question, model, runtime_kwargs)
             pr = self._provider_routing
 
             # Snapshot history from running agent or stored transcript
@@ -5669,6 +5786,20 @@ class GatewayRunner:
             pr = self._provider_routing
             reasoning_config = self._load_reasoning_config()
             self._reasoning_config = reasoning_config
+
+            # --- Per-channel overrides (model, provider, reasoning, system prompt) ---
+            _chat_id_str = str(getattr(source, "chat_id", "") or "")
+            model, runtime_kwargs, reasoning_config, _channel_cfg, _channel_model_set = (
+                _apply_channel_overrides(user_config, _chat_id_str, model, runtime_kwargs, reasoning_config)
+            )
+            if _channel_cfg:
+                self._reasoning_config = reasoning_config  # keep instance in sync
+                _ch_prompt = (_channel_cfg.get("system_prompt") or "").strip()
+                if _ch_prompt:
+                    combined_ephemeral = (combined_ephemeral + "\n\n" + _ch_prompt).strip()
+                if _channel_cfg.get("name"):
+                    logger.debug("Channel overrides active for %s (%s)", _chat_id_str, _channel_cfg["name"])
+
             # Set up streaming consumer if enabled
             _stream_consumer = None
             _stream_delta_cb = None
@@ -5698,7 +5829,26 @@ class GatewayRunner:
                 except Exception as _sc_err:
                     logger.debug("Could not set up stream consumer: %s", _sc_err)
 
-            turn_route = self._resolve_turn_agent_config(message, model, runtime_kwargs)
+            # Bypass smart model routing when channel explicitly sets a model
+            if _channel_model_set:
+                turn_route = {
+                    "model": model,
+                    "runtime": {
+                        "api_key": runtime_kwargs.get("api_key"),
+                        "base_url": runtime_kwargs.get("base_url"),
+                        "provider": runtime_kwargs.get("provider"),
+                        "api_mode": runtime_kwargs.get("api_mode"),
+                        "command": runtime_kwargs.get("command"),
+                        "args": list(runtime_kwargs.get("args") or []),
+                        "credential_pool": runtime_kwargs.get("credential_pool"),
+                    },
+                    "label": None,
+                    "signature": (model, runtime_kwargs.get("provider"), runtime_kwargs.get("base_url"),
+                                  runtime_kwargs.get("api_mode"), runtime_kwargs.get("command"),
+                                  tuple(runtime_kwargs.get("args") or ())),
+                }
+            else:
+                turn_route = self._resolve_turn_agent_config(message, model, runtime_kwargs)
 
             # Check agent cache — reuse the AIAgent from the previous message
             # in this session to preserve the frozen system prompt and tool

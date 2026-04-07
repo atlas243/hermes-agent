@@ -93,6 +93,31 @@ SKILLS_DIR = HERMES_HOME / "skills"
 MAX_NAME_LENGTH = 64
 MAX_DESCRIPTION_LENGTH = 1024
 
+# Skill usage log — JSONL file tracking every skill_view() call.
+_SKILL_USAGE_LOG = HERMES_HOME / "skills" / ".usage_log.jsonl"
+
+
+def _log_skill_usage(skill_name: str, file_path: str = None) -> None:
+    """Append a usage entry to the JSONL skill usage log.
+
+    Non-fatal — silently ignores any write errors so skill loading
+    is never blocked by a logging failure.
+    """
+    try:
+        import time as _t
+        from datetime import datetime as _dt, timezone as _tz
+        entry = {
+            "skill": skill_name,
+            "file": file_path,
+            "timestamp": _dt.now(_tz.utc).isoformat(),
+            "session_id": os.getenv("HERMES_SESSION_KEY", ""),
+        }
+        _SKILL_USAGE_LOG.parent.mkdir(parents=True, exist_ok=True)
+        with open(_SKILL_USAGE_LOG, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except Exception:
+        pass  # Never block skill loading for a logging failure
+
 # Platform identifiers for the 'platforms' frontmatter field.
 # Maps user-friendly names to sys.platform prefixes.
 _PLATFORM_MAP = {
@@ -1028,6 +1053,7 @@ def skill_view(name: str, file_path: str = None, task_id: str = None) -> str:
                     ensure_ascii=False,
                 )
 
+            _log_skill_usage(name, file_path)
             return json.dumps(
                 {
                     "success": True,
@@ -1236,6 +1262,7 @@ def skill_view(name: str, file_path: str = None, task_id: str = None) -> str:
         if isinstance(metadata, dict):
             result["metadata"] = metadata
 
+        _log_skill_usage(skill_name)
         return json.dumps(result, ensure_ascii=False)
 
     except Exception as e:

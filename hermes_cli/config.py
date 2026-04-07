@@ -465,6 +465,18 @@ DEFAULT_CONFIG = {
     # (apiKey, workspace, peerName, sessions, enabled) comes from the global config.
     "honcho": {},
 
+    # Per-channel overrides — keyed by chat_id (string).
+    # Each entry can override: model, provider, reasoning_effort, system_prompt.
+    # Unset fields fall through to the global defaults.
+    # Example:
+    #   channels:
+    #     "-1003729751268":
+    #       name: "My Group"
+    #       model: claude-sonnet-4
+    #       reasoning_effort: low
+    #       system_prompt: "Be concise."
+    "channels": {},
+
     # IANA timezone (e.g. "Asia/Kolkata", "America/New_York").
     # Empty string means use server-local time.
     "timezone": "",
