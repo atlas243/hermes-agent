@@ -147,6 +147,8 @@ class TelegramAdapter(BasePlatformAdapter):
         self._dm_topics: Dict[str, int] = {}
         # DM Topics config from extra.dm_topics
         self._dm_topics_config: List[Dict[str, Any]] = self.config.extra.get("dm_topics", [])
+        # Per-channel menu: track config.yaml mtime to auto-refresh on change
+        self._menu_config_mtime: float = 0.0
 
     def _fallback_ips(self) -> list[str]:
         """Return validated fallback IPs from config (populated by _apply_env_overrides)."""
@@ -388,13 +390,16 @@ class TelegramAdapter(BasePlatformAdapter):
         except Exception as e:
             logger.warning("[%s] Failed to persist thread_id to config: %s", self.name, e, exc_info=True)
 
-    async def _register_per_channel_menus(self) -> None:
+    async def _register_per_channel_menus(self, force: bool = False) -> None:
         """Set per-chat Telegram command menus for channels with priority_skills.
 
         Reads the ``channels`` section from config.yaml and, for each channel
         that defines ``priority_skills``, calls ``set_my_commands`` with a
         ``BotCommandScopeChat`` so those skills appear first in the autocomplete
         menu for that specific chat.
+
+        Tracks config.yaml mtime to skip re-registration when nothing changed.
+        Pass ``force=True`` to bypass the mtime check (used at startup).
         """
         try:
             import yaml
@@ -402,6 +407,12 @@ class TelegramAdapter(BasePlatformAdapter):
             config_path = get_hermes_home() / "config.yaml"
             if not config_path.exists():
                 return
+
+            current_mtime = config_path.stat().st_mtime
+            if not force and current_mtime == self._menu_config_mtime:
+                return
+            self._menu_config_mtime = current_mtime
+
             with open(config_path, "r") as f:
                 user_config = yaml.safe_load(f) or {}
         except Exception as e:
@@ -699,7 +710,7 @@ class TelegramAdapter(BasePlatformAdapter):
 
                 # Per-channel command menus: channels with priority_skills get
                 # a custom menu where those skills are promoted to the front.
-                await self._register_per_channel_menus()
+                await self._register_per_channel_menus(force=True)
 
             except Exception as e:
                 logger.warning(
@@ -1619,6 +1630,8 @@ class TelegramAdapter(BasePlatformAdapter):
         if not self._should_process_message(update.message, is_command=True):
             return
         
+        # Refresh per-channel menus if config.yaml changed (mtime check, no-op if unchanged)
+        asyncio.create_task(self._register_per_channel_menus())
         event = self._build_message_event(update.message, MessageType.COMMAND)
         await self.handle_message(event)
     
@@ -1712,6 +1725,8 @@ class TelegramAdapter(BasePlatformAdapter):
                 "[Telegram] Flushing text batch %s (%d chars)",
                 key, len(event.text or ""),
             )
+            # Refresh per-channel menus if config.yaml changed (mtime check, no-op if unchanged)
+            asyncio.create_task(self._register_per_channel_menus())
             await self.handle_message(event)
         finally:
             if self._pending_text_batch_tasks.get(key) is current_task:
