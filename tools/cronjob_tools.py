@@ -125,6 +125,7 @@ def _format_job(job: Dict[str, Any]) -> Dict[str, Any]:
         "model": job.get("model"),
         "provider": job.get("provider"),
         "base_url": job.get("base_url"),
+        "timeout_seconds": job.get("timeout_seconds"),
         "schedule": job.get("schedule_display"),
         "repeat": _repeat_display(job),
         "deliver": job.get("deliver", "local"),
@@ -153,6 +154,7 @@ def cronjob(
     provider: Optional[str] = None,
     base_url: Optional[str] = None,
     reason: Optional[str] = None,
+    timeout_seconds: Optional[int] = None,
     task_id: str = None,
 ) -> str:
     """Unified cron job management tool."""
@@ -183,6 +185,7 @@ def cronjob(
                 model=_normalize_optional_job_value(model),
                 provider=_normalize_optional_job_value(provider),
                 base_url=_normalize_optional_job_value(base_url, strip_trailing_slash=True),
+                timeout_seconds=timeout_seconds,
             )
             return json.dumps(
                 {
@@ -265,6 +268,8 @@ def cronjob(
                 updates["provider"] = _normalize_optional_job_value(provider)
             if base_url is not None:
                 updates["base_url"] = _normalize_optional_job_value(base_url, strip_trailing_slash=True)
+            if timeout_seconds is not None:
+                updates["timeout_seconds"] = timeout_seconds if timeout_seconds > 0 else None
             if repeat is not None:
                 # Normalize: treat 0 or negative as None (infinite)
                 normalized_repeat = None if repeat <= 0 else repeat
@@ -402,6 +407,11 @@ Important safety rule: cron-run sessions should not recursively schedule more cr
             "reason": {
                 "type": "string",
                 "description": "Optional pause reason"
+            },
+            "timeout_seconds": {
+                "type": "integer",
+                "description": "Optional per-job timeout in seconds. Default is 600 (10 minutes). Set higher for browser-heavy jobs (e.g. 1200 for 20 minutes). Falls back to HERMES_CRON_TIMEOUT env var, then 600s.",
+                "minimum": 60
             }
         },
         "required": ["action"]
@@ -451,6 +461,7 @@ registry.register(
         provider=args.get("provider"),
         base_url=args.get("base_url"),
         reason=args.get("reason"),
+        timeout_seconds=args.get("timeout_seconds"),
         task_id=kw.get("task_id"),
     ),
     check_fn=check_cronjob_requirements,

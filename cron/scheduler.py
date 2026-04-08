@@ -448,7 +448,7 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
         # block the cron ticker thread indefinitely.  Default 10 minutes;
         # override via env var.  Uses a separate thread because
         # run_conversation is synchronous.
-        _cron_timeout = float(os.getenv("HERMES_CRON_TIMEOUT", 600))
+        _cron_timeout = float(job.get("timeout_seconds") or os.getenv("HERMES_CRON_TIMEOUT", 600))
         _cron_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         _cron_future = _cron_pool.submit(agent.run_conversation, prompt)
         try:

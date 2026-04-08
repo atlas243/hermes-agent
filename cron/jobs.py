@@ -375,6 +375,7 @@ def create_job(
     model: Optional[str] = None,
     provider: Optional[str] = None,
     base_url: Optional[str] = None,
+    timeout_seconds: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
     Create a new cron job.
@@ -391,6 +392,7 @@ def create_job(
         model: Optional per-job model override
         provider: Optional per-job provider override
         base_url: Optional per-job base URL override
+        timeout_seconds: Optional per-job timeout in seconds (overrides HERMES_CRON_TIMEOUT)
 
     Returns:
         The created job dict
@@ -448,6 +450,7 @@ def create_job(
         # Delivery configuration
         "deliver": deliver,
         "origin": origin,  # Tracks where job was created for "origin" delivery
+        "timeout_seconds": timeout_seconds,
     }
 
     jobs = load_jobs()
