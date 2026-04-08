@@ -467,6 +467,39 @@ def _apply_channel_overrides(
     return model, runtime_kwargs, reasoning_config, channel_cfg, model_explicitly_set
 
 
+def _resolve_timeout_config(
+    user_config: dict,
+    channel_cfg: dict,
+) -> tuple[float, float]:
+    """Resolve progress-aware timeout thresholds for this request.
+
+    Resolution order (per field):
+      1. Per-channel ``timeout`` block
+      2. Global ``timeout`` block in config.yaml
+      3. ``HERMES_AGENT_TIMEOUT`` env var (max_ceiling only)
+      4. Hardcoded defaults (ceiling=600, idle=300)
+
+    Returns:
+        (max_ceiling_seconds, idle_threshold_seconds)
+    """
+    _DEFAULT_CEILING = 600.0
+    _DEFAULT_IDLE = 300.0
+
+    # Global config
+    global_timeout = user_config.get("timeout") or {}
+    env_ceiling = os.getenv("HERMES_AGENT_TIMEOUT")
+
+    base_ceiling = float(global_timeout.get("max_ceiling") or (env_ceiling if env_ceiling else _DEFAULT_CEILING))
+    base_idle = float(global_timeout.get("idle_threshold") or _DEFAULT_IDLE)
+
+    # Per-channel override
+    ch_timeout = channel_cfg.get("timeout") or {}
+    ceiling = float(ch_timeout.get("max_ceiling") or base_ceiling)
+    idle = float(ch_timeout.get("idle_threshold") or base_idle)
+
+    return ceiling, idle
+
+
 def _resolve_gateway_model(config: dict | None = None) -> str:
     """Read model from config.yaml — single source of truth.
 
@@ -1809,7 +1842,10 @@ class GatewayRunner:
         # Staleness eviction: if an entry has been in _running_agents for
         # longer than the agent timeout, it's a leaked lock from a hung or
         # crashed handler.  Evict it so the session isn't permanently stuck.
-        _STALE_TTL = float(os.getenv("HERMES_AGENT_TIMEOUT", 600)) + 60  # timeout + 1 min grace
+        # Use the global timeout config for stale TTL (per-channel not available here)
+        _global_timeout = (self.config_dict or {}).get("timeout", {}) if hasattr(self, "config_dict") else {}
+        _stale_ceiling = float(_global_timeout.get("max_ceiling", 0) if isinstance(_global_timeout, dict) else 0) or float(os.getenv("HERMES_AGENT_TIMEOUT", 600))
+        _STALE_TTL = _stale_ceiling + 120  # ceiling + 2 min grace (backstop is ceiling + 60)
         _stale_ts = self._running_agents_ts.get(_quick_key, 0)
         if _quick_key in self._running_agents and _stale_ts and (time.time() - _stale_ts) > _STALE_TTL:
             logger.warning(
@@ -6213,56 +6249,124 @@ class GatewayRunner:
         
         tracking_task = asyncio.create_task(track_agent())
         
-        # Monitor for interrupts from the adapter (new messages arriving)
-        async def monitor_for_interrupt():
+        # ── Progress-aware timeout ────────────────────────────────────────
+        # Two thresholds:
+        #   max_ceiling:    absolute wall-clock cap (channel or global config)
+        #   idle_threshold: kill after N seconds of no observable activity
+        # The agent's _last_activity_ts is bumped on tool completions, API
+        # responses, and streaming chunks.  Child-agent work propagates up.
+        _timeout_ceiling, _timeout_idle = _resolve_timeout_config(
+            user_config, _channel_cfg if '_channel_cfg' in dir() else {},
+        )
+
+        # Monitor for interrupts AND progress-aware timeout in one loop
+        _agent_done = asyncio.Event()
+
+        async def monitor_for_interrupt_and_timeout():
             adapter = self.adapters.get(source.platform)
-            if not adapter or not session_key:
-                return
-            
-            while True:
-                await asyncio.sleep(0.2)  # Check every 200ms
-                # Check if adapter has a pending interrupt for this session.
-                # Must use session_key (build_session_key output) — NOT
-                # source.chat_id — because the adapter stores interrupt events
-                # under the full session key.
-                if hasattr(adapter, 'has_pending_interrupt') and adapter.has_pending_interrupt(session_key):
-                    agent = agent_holder[0]
-                    if agent:
-                        pending_event = adapter.get_pending_message(session_key)
-                        pending_text = pending_event.text if pending_event else None
-                        logger.debug("Interrupt detected from adapter, signaling agent...")
-                        agent.interrupt(pending_text)
-                        break
-        
-        interrupt_monitor = asyncio.create_task(monitor_for_interrupt())
+            _start = time.time()
+
+            while not _agent_done.is_set():
+                await asyncio.sleep(2)  # Check every 2 seconds
+
+                # 1. Interrupt from adapter (new message arrived)
+                if adapter and session_key:
+                    if hasattr(adapter, 'has_pending_interrupt') and adapter.has_pending_interrupt(session_key):
+                        agent = agent_holder[0]
+                        if agent:
+                            pending_event = adapter.get_pending_message(session_key)
+                            pending_text = pending_event.text if pending_event else None
+                            logger.debug("Interrupt detected from adapter, signaling agent...")
+                            agent.interrupt(pending_text)
+                            return
+
+                _elapsed = time.time() - _start
+                agent = agent_holder[0]
+
+                # 2. Max ceiling — absolute wall-clock limit
+                if _elapsed > _timeout_ceiling:
+                    logger.error(
+                        "Agent hit max ceiling (%.0fs) for session %s",
+                        _timeout_ceiling, session_key,
+                    )
+                    if agent and hasattr(agent, "interrupt"):
+                        agent.interrupt("Max timeout ceiling reached")
+                    return
+
+                # 3. Idle timeout — no activity for too long
+                if agent and hasattr(agent, '_last_activity_ts'):
+                    _idle_seconds = time.time() - agent._last_activity_ts
+                    # Respect agent self-extended idle (e.g. during delegation)
+                    _effective_idle = (
+                        agent._requested_idle_timeout
+                        if getattr(agent, '_requested_idle_timeout', None)
+                        else _timeout_idle
+                    )
+                    if _idle_seconds > _effective_idle:
+                        logger.error(
+                            "Agent idle timeout (%.0fs idle, threshold %.0fs) for session %s",
+                            _idle_seconds, _effective_idle, session_key,
+                        )
+                        agent.interrupt("Idle timeout — no activity")
+                        return
+
+        # Track which timeout fired so we can give a good error message
+        _timeout_reason = [None]  # mutable holder for closure
+
+        interrupt_monitor = asyncio.create_task(monitor_for_interrupt_and_timeout())
         
         try:
-            # Run in thread pool to not block.  Cap total execution time
-            # so a hung API call or runaway tool doesn't permanently lock
-            # the session.  Default 10 minutes; override with env var.
-            _agent_timeout = float(os.getenv("HERMES_AGENT_TIMEOUT", 600))
+            # Hard backstop: wait_for at ceiling + 60s grace.  The monitor
+            # loop handles the smart timeout logic; this catches truly hung
+            # agents that don't respond to interrupt().
+            _hard_backstop = _timeout_ceiling + 60
             loop = asyncio.get_event_loop()
             try:
                 response = await asyncio.wait_for(
                     loop.run_in_executor(None, run_sync),
-                    timeout=_agent_timeout,
+                    timeout=_hard_backstop,
                 )
             except asyncio.TimeoutError:
                 logger.error(
-                    "Agent execution timed out after %.0fs for session %s",
-                    _agent_timeout, session_key,
+                    "Agent hard backstop (%.0fs) for session %s",
+                    _hard_backstop, session_key,
                 )
-                # Interrupt the agent if it's still running so the thread
-                # pool worker is freed.
                 _timed_out_agent = agent_holder[0]
                 if _timed_out_agent and hasattr(_timed_out_agent, "interrupt"):
-                    _timed_out_agent.interrupt("Execution timed out")
-                response = {
-                    "final_response": (
-                        f"⏱️ Request timed out after {int(_agent_timeout // 60)} minutes. "
-                        "The agent may have been stuck on a tool or API call.\n"
+                    _timed_out_agent.interrupt("Hard timeout backstop")
+                response = None
+
+            _agent_done.set()
+
+            # Check if the response came from an interrupted agent (timeout)
+            _was_timeout = (
+                response is None
+                or (isinstance(response, dict) and response.get("interrupted"))
+            )
+
+            if _was_timeout and (response is None or not response.get("final_response", "").strip()):
+                # Agent was interrupted by timeout — build informative message
+                _timed_out_agent = agent_holder[0]
+                _was_idle = False
+                if _timed_out_agent and hasattr(_timed_out_agent, '_last_activity_ts'):
+                    _was_idle = (time.time() - _timed_out_agent._last_activity_ts) > _timeout_idle
+
+                if _was_idle:
+                    _timeout_msg = (
+                        f"⏱️ Request timed out — no activity for "
+                        f"{int(_timeout_idle // 60)} minutes. "
+                        "The agent may have been stuck on an API call or tool.\n"
                         "Try again, or use /reset to start fresh."
-                    ),
+                    )
+                else:
+                    _timeout_msg = (
+                        f"⏱️ Request hit the {int(_timeout_ceiling // 60)}-minute "
+                        "time limit for this channel.\n"
+                        "Consider breaking the task into smaller steps, "
+                        "or use /reset to start fresh."
+                    )
+                response = {
+                    "final_response": _timeout_msg,
                     "messages": result_holder[0].get("messages", []) if result_holder[0] else [],
                     "api_calls": 0,
                     "tools": tools_holder[0] or [],

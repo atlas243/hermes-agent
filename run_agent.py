@@ -599,6 +599,14 @@ class AIAgent:
         self._interrupt_requested = False
         self._interrupt_message = None  # Optional message that triggered interrupt
         self._client_lock = threading.RLock()
+
+        # Progress-aware timeout: activity tracking
+        # Gateway polls _last_activity_ts to detect idle agents.
+        # Updated on tool completions, API responses, and streaming chunks.
+        self._last_activity_ts: float = time.time()
+        # Agent can request a higher idle threshold mid-execution (e.g. during
+        # delegation or long terminal commands). None = use channel/global default.
+        self._requested_idle_timeout: Optional[float] = None
         
         # Subagent delegation state
         self._delegate_depth = 0        # 0 = top-level agent, incremented for children
@@ -2341,6 +2349,16 @@ class AIAgent:
         self._interrupt_message = None
         _set_interrupt(False)
 
+    def touch_activity(self) -> None:
+        """Update the last-activity timestamp. Thread-safe.
+
+        Called on tool completions, API responses, streaming chunks, and
+        child-agent progress.  The gateway's progress-aware timeout monitor
+        polls ``_last_activity_ts`` to distinguish idle agents from actively
+        working ones.
+        """
+        self._last_activity_ts = time.time()
+
     def shutdown_memory_provider(self, messages: list = None) -> None:
         """Shut down the memory provider — call at actual session boundaries.
 
@@ -4082,8 +4100,14 @@ class AIAgent:
             # knows whether reasoning was already displayed during streaming.
             self._reasoning_deltas_fired = False
 
+            _last_activity_touch = 0.0  # throttle touch_activity during streaming
+
             for chunk in stream:
                 last_chunk_time["t"] = time.time()
+                # Throttled activity bump — every 10s, not every chunk
+                if last_chunk_time["t"] - _last_activity_touch > 10:
+                    self.touch_activity()
+                    _last_activity_touch = last_chunk_time["t"]
 
                 if self._interrupt_requested:
                     break
@@ -4239,8 +4263,15 @@ class AIAgent:
             # Reset stale-stream timer for this attempt
             last_chunk_time["t"] = time.time()
             # Use the Anthropic SDK's streaming context manager
+            _last_activity_touch_anth = 0.0  # throttle touch_activity
+
             with self._anthropic_client.messages.stream(**api_kwargs) as stream:
                 for event in stream:
+                    _now = time.time()
+                    if _now - _last_activity_touch_anth > 10:
+                        self.touch_activity()
+                        _last_activity_touch_anth = _now
+
                     if self._interrupt_requested:
                         break
 
@@ -5802,6 +5833,9 @@ class AIAgent:
                     response_preview = function_result[:self.log_prefix_chars] + "..." if len(function_result) > self.log_prefix_chars else function_result
                     print(f"  ✅ Tool {i+1} completed in {tool_duration:.2f}s - {response_preview}")
 
+            # Bump activity timestamp for progress-aware timeout
+            self.touch_activity()
+
             if self.tool_complete_callback:
                 try:
                     self.tool_complete_callback(tc.id, name, args, function_result)
@@ -5925,6 +5959,15 @@ class AIAgent:
                         )
                 except Exception:
                     pass  # never block tool execution
+
+            # Auto-extend idle timeout for long foreground terminal commands.
+            # If the agent explicitly set a high timeout, it expects to wait.
+            _prev_idle = None
+            if function_name == "terminal" and not function_args.get("background"):
+                _term_timeout = function_args.get("timeout")
+                if _term_timeout and _term_timeout > 300:
+                    _prev_idle = self._requested_idle_timeout
+                    self._requested_idle_timeout = float(_term_timeout) + 60.0
 
             tool_start_time = time.time()
 
@@ -6082,6 +6125,13 @@ class AIAgent:
             if self.verbose_logging:
                 logging.debug(f"Tool {function_name} completed in {tool_duration:.2f}s")
                 logging.debug(f"Tool result ({len(function_result)} chars): {function_result}")
+
+            # Restore idle timeout after long terminal commands
+            if _prev_idle is not None:
+                self._requested_idle_timeout = _prev_idle
+
+            # Bump activity timestamp for progress-aware timeout
+            self.touch_activity()
 
             if self.tool_complete_callback:
                 try:
@@ -7095,6 +7145,7 @@ class AIAgent:
 
                         if self.api_mode == "chat_completions":
                             assistant_message = response.choices[0].message
+                            self.touch_activity()  # API response received
                             if not assistant_message.tool_calls:
                                 length_continue_retries += 1
                                 interim_msg = self._build_assistant_message(assistant_message, finish_reason)
@@ -7913,6 +7964,9 @@ class AIAgent:
                         assistant_message.content = "\n".join(parts)
                     else:
                         assistant_message.content = str(raw)
+
+                # Bump activity timestamp — API response received
+                self.touch_activity()
 
                 # Handle assistant response
                 if assistant_message.content and not self.quiet_mode:

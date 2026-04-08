@@ -466,7 +466,7 @@ DEFAULT_CONFIG = {
     "honcho": {},
 
     # Per-channel overrides — keyed by chat_id (string).
-    # Each entry can override: model, provider, reasoning_effort, system_prompt.
+    # Each entry can override: model, provider, reasoning_effort, system_prompt, timeout.
     # Unset fields fall through to the global defaults.
     # Example:
     #   channels:
@@ -475,7 +475,20 @@ DEFAULT_CONFIG = {
     #       model: claude-sonnet-4
     #       reasoning_effort: low
     #       system_prompt: "Be concise."
+    #       timeout:
+    #         max_ceiling: 1800   # 30 min
+    #         idle_threshold: 300  # 5 min
     "channels": {},
+
+    # Progress-aware agent timeout.  Two thresholds:
+    #   max_ceiling:    absolute wall-clock cap per request (seconds)
+    #   idle_threshold: kill after this many seconds of no tool/API activity
+    # Per-channel overrides in channels.<chat_id>.timeout take precedence.
+    # Env var HERMES_AGENT_TIMEOUT is used as max_ceiling fallback.
+    "timeout": {
+        "max_ceiling": 600,       # 10 min default
+        "idle_threshold": 300,    # 5 min default
+    },
 
     # IANA timezone (e.g. "Asia/Kolkata", "America/New_York").
     # Empty string means use server-local time.
@@ -536,7 +549,7 @@ DEFAULT_CONFIG = {
     },
 
     # Config schema version - bump this when adding new required fields
-    "_config_version": 11,
+    "_config_version": 12,
 }
 
 # =============================================================================
@@ -1292,6 +1305,22 @@ def migrate_config(interactive: bool = True, quiet: bool = False) -> Dict[str, A
                     print("  ✓ Cleared ANTHROPIC_TOKEN from .env (no longer used)")
         except Exception:
             pass
+
+    # ── Version 11 → 12: add progress-aware timeout config ──
+    if current_ver < 12:
+        config = load_config()
+        if "timeout" not in config:
+            # Migrate from env var if set, otherwise use defaults
+            env_timeout = os.getenv("HERMES_AGENT_TIMEOUT")
+            ceiling = int(env_timeout) if env_timeout else 600
+            config["timeout"] = {
+                "max_ceiling": ceiling,
+                "idle_threshold": 300,
+            }
+            save_config(config)
+            results["config_added"].append(f"timeout.max_ceiling={ceiling}, timeout.idle_threshold=300")
+            if not quiet:
+                print(f"  ✓ Added progress-aware timeout config (ceiling={ceiling}s, idle=300s)")
 
     if current_ver < latest_ver and not quiet:
         print(f"Config version: {current_ver} → {latest_ver}")

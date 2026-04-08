@@ -98,7 +98,13 @@ def _build_child_progress_callback(task_index: int, parent_agent, task_count: in
     _BATCH_SIZE = 5
     _batch: List[str] = []
 
-    def _callback(tool_name: str, preview: str = None):
+    def _callback(tool_name: str, preview: str = None, *_args):
+        # Propagate child activity to parent for progress-aware timeout.
+        # Every child tool call / thinking event bumps the parent's timestamp
+        # so the gateway knows the agent tree is still actively working.
+        if hasattr(parent_agent, 'touch_activity'):
+            parent_agent.touch_activity()
+
         # Special "_thinking" event: model produced text content (reasoning)
         if tool_name == "_thinking":
             if spinner:
@@ -495,6 +501,13 @@ def delegate_task(
         # Authoritative restore: reset global to parent's tool names after all children built
         _model_tools._last_resolved_tool_names = _parent_tool_names
 
+    # Auto-extend idle timeout for delegation.  Subagent work naturally takes
+    # longer than a single tool call; without this the gateway's progress-aware
+    # monitor could kill the parent while a child is actively working.
+    _prev_idle_timeout = getattr(parent_agent, '_requested_idle_timeout', None)
+    if hasattr(parent_agent, '_requested_idle_timeout'):
+        parent_agent._requested_idle_timeout = 600.0  # 10 min idle during delegation
+
     if n_tasks == 1:
         # Single task -- run directly (no thread pool overhead)
         _i, _t, child = children[0]
@@ -558,6 +571,10 @@ def delegate_task(
 
         # Sort by task_index so results match input order
         results.sort(key=lambda r: r["task_index"])
+
+    # Restore previous idle timeout after delegation completes
+    if hasattr(parent_agent, '_requested_idle_timeout'):
+        parent_agent._requested_idle_timeout = _prev_idle_timeout
 
     # Notify parent's memory provider of delegation outcomes
     if parent_agent and hasattr(parent_agent, '_memory_manager') and parent_agent._memory_manager:
