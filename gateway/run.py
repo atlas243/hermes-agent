@@ -6364,7 +6364,10 @@ class GatewayRunner:
 
                 # 3. Idle timeout — no activity for too long
                 if agent and hasattr(agent, '_last_activity_ts'):
-                    _idle_seconds = time.time() - agent._last_activity_ts
+                    # Use the more recent of (agent's last activity, monitor start)
+                    # to avoid false kills from stale cached-agent timestamps.
+                    _baseline = max(agent._last_activity_ts, _start)
+                    _idle_seconds = time.time() - _baseline
                     # Respect agent self-extended idle (e.g. during delegation)
                     _effective_idle = (
                         agent._requested_idle_timeout
