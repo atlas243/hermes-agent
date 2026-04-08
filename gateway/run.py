@@ -6006,6 +6006,9 @@ class GatewayRunner:
             agent.stream_delta_callback = _stream_delta_cb
             agent.status_callback = _status_callback_sync
             agent.reasoning_config = reasoning_config
+            # Reset activity timestamp so the progress-aware timeout monitor
+            # doesn't see stale timestamps from a previous cached-agent turn.
+            agent.touch_activity()
 
             # Background review delivery — send "💾 Memory updated" etc. to user
             def _bg_review_send(message: str) -> None:
