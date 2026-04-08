@@ -388,6 +388,67 @@ class TelegramAdapter(BasePlatformAdapter):
         except Exception as e:
             logger.warning("[%s] Failed to persist thread_id to config: %s", self.name, e, exc_info=True)
 
+    async def _register_per_channel_menus(self) -> None:
+        """Set per-chat Telegram command menus for channels with priority_skills.
+
+        Reads the ``channels`` section from config.yaml and, for each channel
+        that defines ``priority_skills``, calls ``set_my_commands`` with a
+        ``BotCommandScopeChat`` so those skills appear first in the autocomplete
+        menu for that specific chat.
+        """
+        try:
+            import yaml
+            from hermes_constants import get_hermes_home
+            config_path = get_hermes_home() / "config.yaml"
+            if not config_path.exists():
+                return
+            with open(config_path, "r") as f:
+                user_config = yaml.safe_load(f) or {}
+        except Exception as e:
+            logger.debug("[%s] Could not load config for per-channel menus: %s", self.name, e)
+            return
+
+        channels = user_config.get("channels") or {}
+        if not channels:
+            return
+
+        from telegram import BotCommand, BotCommandScopeChat
+        from hermes_cli.commands import telegram_menu_commands
+
+        for chat_id_str, channel_cfg in channels.items():
+            if not isinstance(channel_cfg, dict):
+                continue
+            priority_skills = channel_cfg.get("priority_skills")
+            if not priority_skills or not isinstance(priority_skills, list):
+                continue
+
+            try:
+                chat_id = int(chat_id_str)
+            except (ValueError, TypeError):
+                logger.debug("[%s] Skipping non-integer channel key: %s", self.name, chat_id_str)
+                continue
+
+            try:
+                menu_commands, _ = telegram_menu_commands(
+                    max_commands=100,
+                    priority_skills=priority_skills,
+                )
+                scope = BotCommandScopeChat(chat_id=chat_id)
+                await self._bot.set_my_commands(
+                    [BotCommand(name, desc) for name, desc in menu_commands],
+                    scope=scope,
+                )
+                channel_name = channel_cfg.get("name", chat_id_str)
+                logger.info(
+                    "[%s] Per-channel menu set for %s (%s): %d priority skills",
+                    self.name, channel_name, chat_id_str, len(priority_skills),
+                )
+            except Exception as e:
+                logger.warning(
+                    "[%s] Failed to set per-channel menu for %s: %s",
+                    self.name, chat_id_str, e,
+                )
+
     async def _setup_dm_topics(self) -> None:
         """Load or create configured DM topics for specified chats.
 
@@ -635,6 +696,11 @@ class TelegramAdapter(BasePlatformAdapter):
                         "[%s] Telegram menu: %d commands registered, %d hidden (over 100 limit). Use /commands for full list.",
                         self.name, len(menu_commands), hidden_count,
                     )
+
+                # Per-channel command menus: channels with priority_skills get
+                # a custom menu where those skills are promoted to the front.
+                await self._register_per_channel_menus()
+
             except Exception as e:
                 logger.warning(
                     "[%s] Could not register Telegram command menu: %s",

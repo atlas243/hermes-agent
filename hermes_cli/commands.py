@@ -404,18 +404,28 @@ def _clamp_telegram_names(
     return result
 
 
-def telegram_menu_commands(max_commands: int = 100) -> tuple[list[tuple[str, str]], int]:
+def telegram_menu_commands(
+    max_commands: int = 100,
+    priority_skills: list[str] | None = None,
+) -> tuple[list[tuple[str, str]], int]:
     """Return Telegram menu commands capped to the Bot API limit.
 
     Priority order (higher priority = never bumped by overflow):
       1. Core CommandDef commands (always included)
       2. Plugin slash commands (take precedence over skills)
-      3. Built-in skill commands (fill remaining slots, alphabetical)
+      3. Priority skill commands (from ``priority_skills``, order preserved)
+      4. Built-in skill commands (fill remaining slots, alphabetical)
 
     Skills are the only tier that gets trimmed when the cap is hit.
     User-installed hub skills are excluded — accessible via /skills.
     Skills disabled for the ``"telegram"`` platform (via ``hermes skills
     config``) are excluded from the menu entirely.
+
+    Args:
+        max_commands: Maximum number of commands (Telegram limit is 100).
+        priority_skills: Optional list of skill names to place first in the
+            skill tier.  Names use hyphens (e.g. ``"syndicate"``); they are
+            normalised to underscores for Telegram automatically.
 
     Returns:
         (menu_commands, hidden_count) where hidden_count is the number of
@@ -488,6 +498,23 @@ def telegram_menu_commands(max_commands: int = 100) -> tuple[list[tuple[str, str
 
     # Clamp skill names to 32 chars with collision avoidance
     skill_entries = _clamp_telegram_names(skill_entries, reserved_names)
+
+    # Reorder skills: priority_skills first (preserving user order), then rest alphabetically.
+    if priority_skills:
+        # Normalise to underscore form (Telegram command names can't have hyphens)
+        _prio_tg = [s.replace("-", "_") for s in priority_skills]
+        _prio_set = set(_prio_tg)
+        prio_entries = []
+        rest_entries = []
+        for entry in skill_entries:
+            if entry[0] in _prio_set:
+                prio_entries.append(entry)
+            else:
+                rest_entries.append(entry)
+        # Sort priority entries by the user-specified order
+        _prio_order = {name: i for i, name in enumerate(_prio_tg)}
+        prio_entries.sort(key=lambda e: _prio_order.get(e[0], 999))
+        skill_entries = prio_entries + rest_entries
 
     # Skills fill remaining slots — they're the only tier that gets trimmed
     remaining_slots = max(0, max_commands - len(all_commands))
