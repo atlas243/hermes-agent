@@ -418,6 +418,41 @@ automatically scope to the active profile.
    This is intentional — it lets `hermes -p coder profile list` see all profiles regardless
    of which one is active.
 
+## Progress-Aware Agent Timeout
+
+The gateway uses a two-threshold timeout system instead of a flat wall-clock limit:
+
+- **Idle timeout** (`idle_threshold`): Kills the agent after N seconds of no observable activity
+  (tool completions, API responses, streaming chunks). Default: 300s (5 min).
+- **Max ceiling** (`max_ceiling`): Absolute wall-clock cap regardless of activity. Default: 600s (10 min).
+
+Both are configurable per-channel in `config.yaml`:
+```yaml
+timeout:
+  max_ceiling: 600       # global default
+  idle_threshold: 300
+
+channels:
+  "-1003746885691":      # Dev channel
+    timeout:
+      max_ceiling: 1800  # 30 min
+      idle_threshold: 300
+```
+
+**Activity tracking:** `AIAgent._last_activity_ts` is bumped automatically on every tool
+completion, API response, and streaming chunk. Child-agent work propagates to the parent
+via `touch_activity()` in the delegation progress callback.
+
+**Auto-extension:** The agent's `_requested_idle_timeout` attribute is set automatically:
+- During `delegate_task`: idle threshold raised to 600s (10 min)
+- During terminal commands with `timeout > 300`: idle threshold raised to `timeout + 60s`
+- Reset to `None` after the operation completes
+
+The gateway monitor checks `_requested_idle_timeout` every 2 seconds and uses it instead
+of the channel default when set.
+
+---
+
 ## Known Pitfalls
 
 ### DO NOT hardcode `~/.hermes` paths
