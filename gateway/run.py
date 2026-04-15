@@ -4661,7 +4661,7 @@ class GatewayRunner:
                 return f"📌 Session: `{session_id}`\nNo title set. Usage: `/title My Session Name`"
 
     async def _handle_resume_command(self, event: MessageEvent) -> str:
-        """Handle /resume command — switch to a previously-named session."""
+        """Handle /resume command — switch to a previous session by title or ID."""
         if not self._session_db:
             return "Session database not available."
 
@@ -4689,14 +4689,15 @@ class GatewayRunner:
                     preview = s.get("preview", "")[:40]
                     preview_part = f" — _{preview}_" if preview else ""
                     lines.append(f"• **{title}**{preview_part}")
-                lines.append("\nUsage: `/resume <session name>`")
+                lines.append("\nUsage: `/resume <session name or ID>`")
                 return "\n".join(lines)
             except Exception as e:
                 logger.debug("Failed to list titled sessions: %s", e)
                 return f"Could not list sessions: {e}"
 
-        # Resolve the name to a session ID
-        target_id = self._session_db.resolve_session_by_title(name)
+        # Resolve the input to a session ID, supporting both exact IDs and titles
+        session = self._session_db.get_session(name)
+        target_id = session["id"] if session else self._session_db.resolve_session_by_title(name)
         if not target_id:
             return (
                 f"No session found matching '**{name}**'.\n"

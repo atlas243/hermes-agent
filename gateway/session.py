@@ -845,7 +845,7 @@ class SessionStore:
     def switch_session(self, session_key: str, target_session_id: str) -> Optional[SessionEntry]:
         """Switch a session key to point at an existing session ID.
 
-        Used by ``/resume`` to restore a previously-named session.
+        Used by ``/resume`` to restore a previous session by title or exact ID.
         Ends the current session in SQLite (like reset), but instead of
         generating a fresh session ID, re-uses ``target_session_id`` so the
         old transcript is loaded on the next message.
