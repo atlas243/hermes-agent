@@ -398,6 +398,44 @@ class TestCmdUpdateLaunchdRestart:
         assert "Gateway restarted" not in captured
         assert "Gateway restarted via launchd" not in captured
 
+    @patch("shutil.which", return_value=None)
+    @patch("subprocess.run")
+    def test_update_from_custom_branch_switches_back_and_skips_auto_restart(
+        self, mock_run, _mock_which, mock_args, capsys, tmp_path, monkeypatch,
+    ):
+        """When update starts on the live customization branch, Hermes should
+        update main, switch back, and require manual review before restart."""
+        plist_path = tmp_path / "ai.hermes.gateway.plist"
+        plist_path.write_text("<plist/>")
+
+        monkeypatch.setattr(gateway_cli, "is_macos", lambda: True)
+        monkeypatch.setattr(gateway_cli, "get_launchd_plist_path", lambda: plist_path)
+
+        mock_run.side_effect = _make_run_side_effect(
+            branch="blaize-customizations",
+            commit_count="3",
+            launchctl_loaded=True,
+        )
+
+        with patch("gateway.status.get_running_pid", return_value=12345), \
+             patch("gateway.status.remove_pid_file"), \
+             patch.object(gateway_cli, "launchd_restart") as mock_launchd_restart:
+            cmd_update(mock_args)
+
+        captured = capsys.readouterr().out
+        assert "switching to main for update" in captured
+        assert "Restored working tree to branch 'blaize-customizations'" in captured
+        assert "Skipping gateway auto-restart" in captured
+        assert "CUSTOMIZATIONS.md" in captured
+        mock_launchd_restart.assert_not_called()
+
+        checkout_calls = [
+            c.args[0] for c in mock_run.call_args_list
+            if len(c.args) > 0 and c.args[0][:2] == ["git", "checkout"]
+        ]
+        assert ["git", "checkout", "main"] in checkout_calls
+        assert ["git", "checkout", "blaize-customizations"] in checkout_calls
+
 
 # ---------------------------------------------------------------------------
 # cmd_update — system-level systemd service detection

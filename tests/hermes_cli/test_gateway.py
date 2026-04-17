@@ -173,6 +173,31 @@ def test_install_linux_gateway_from_setup_system_choice_as_root_installs(monkeyp
     assert calls == [(True, True, "alice")]
 
 
+def test_gateway_restart_blocks_on_wrong_branch(monkeypatch, tmp_path, capsys):
+    plist_path = tmp_path / "ai.hermes.gateway.plist"
+    plist_path.write_text("<plist/>")
+
+    monkeypatch.setattr(gateway, "is_linux", lambda: False)
+    monkeypatch.setattr(gateway, "is_macos", lambda: True)
+    monkeypatch.setattr(gateway, "get_launchd_plist_path", lambda: plist_path)
+    monkeypatch.setattr(
+        gateway,
+        "check_expected_live_branch",
+        lambda repo_root, expected_branch=gateway.EXPECTED_LIVE_BRANCH: (False, "main", None),
+    )
+    monkeypatch.setattr(
+        gateway,
+        "launchd_restart",
+        lambda: (_ for _ in ()).throw(AssertionError("should not restart")),
+    )
+
+    gateway.gateway_command(SimpleNamespace(gateway_command="restart", system=False))
+
+    out = capsys.readouterr().out
+    assert "Refusing to restart gateway from branch 'main'" in out
+    assert "blaize-customizations" in out
+
+
 # ---------------------------------------------------------------------------
 # _wait_for_gateway_exit
 # ---------------------------------------------------------------------------

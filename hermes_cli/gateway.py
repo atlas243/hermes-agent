@@ -15,6 +15,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).parent.parent.resolve()
 
 from hermes_cli.config import get_env_value, get_hermes_home, save_env_value, is_managed, managed_error
+from hermes_cli.git_branch_safety import EXPECTED_LIVE_BRANCH, check_expected_live_branch
 # display_hermes_home is imported lazily at call sites to avoid ImportError
 # when hermes_constants is cached from a pre-update version during `hermes update`.
 from hermes_cli.setup import (
@@ -1972,6 +1973,17 @@ def gateway_command(args):
             print(f"✓ Stopped {killed} additional manual gateway process(es)")
     
     elif subcmd == "restart":
+        ok_branch, current_branch, branch_error = check_expected_live_branch(PROJECT_ROOT)
+        if not ok_branch:
+            print()
+            if branch_error:
+                print(f"✗ Could not verify the active git branch: {branch_error}")
+            else:
+                print(f"✗ Refusing to restart gateway from branch '{current_branch}'.")
+                print(f"  Expected live branch: '{EXPECTED_LIVE_BRANCH}'")
+                print("  Review customizations and switch branches before restarting.")
+            return
+
         # Try service first, fall back to killing and restarting
         service_available = False
         system = getattr(args, 'system', False)

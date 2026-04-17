@@ -78,6 +78,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 # Resolve Hermes home directory (respects HERMES_HOME override)
 from hermes_constants import get_hermes_home
+from hermes_cli.git_branch_safety import EXPECTED_LIVE_BRANCH, check_expected_live_branch
 from utils import atomic_yaml_write
 _hermes_home = get_hermes_home()
 
@@ -5092,11 +5093,21 @@ class GatewayRunner:
                 f"Cannot restart via launchctl. Use `hermes gateway start` from a terminal."
             )
 
+        repo_root = Path(__file__).parent.parent.resolve()
+        ok_branch, current_branch, branch_error = check_expected_live_branch(repo_root)
+        if not ok_branch:
+            if branch_error:
+                return f"✗ Could not verify the active git branch — refusing restart.\n\n{branch_error}"
+            return (
+                f"✗ Refusing to restart gateway from branch '{current_branch}'. "
+                f"Expected live branch: '{EXPECTED_LIVE_BRANCH}'. Review customizations and switch branches before restarting."
+            )
+
         # Pre-flight: verify the gateway module imports cleanly
         preflight = subprocess.run(
             [sys.executable, "-c", "from gateway.run import GatewayRunner"],
             capture_output=True, text=True,
-            cwd=str(Path(__file__).parent.parent.resolve()),
+            cwd=str(repo_root),
         )
         if preflight.returncode != 0:
             return (
