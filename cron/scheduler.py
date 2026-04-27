@@ -317,9 +317,14 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
     if wrap_response:
         task_name = job.get("name", job["id"])
         job_id = job.get("id", "")
+        session_id = job.get("_last_session_id") or job.get("session_id")
+        id_lines = []
+        if session_id:
+            id_lines.append(f"(session_id: {session_id})")
+        id_lines.append(f"(job_id: {job_id})")
         delivery_content = (
             f"Cronjob Response: {task_name}\n"
-            f"(job_id: {job_id})\n"
+            f"{chr(10).join(id_lines)}\n"
             f"-------------\n\n"
             f"{content}\n\n"
             f"To stop or manage this job, send me a new message (e.g. \"stop reminder {task_name}\")."
@@ -677,8 +682,9 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
     prompt = _build_job_prompt(job)
     origin = _resolve_origin(job)
     _cron_session_id = f"cron_{job_id}_{_hermes_now().strftime('%Y%m%d_%H%M%S')}"
+    job["_last_session_id"] = _cron_session_id
 
-    logger.info("Running job '%s' (ID: %s)", job_name, job_id)
+    logger.info("Running job '%s' (ID: %s, session: %s)", job_name, job_id, _cron_session_id)
     logger.info("Prompt: %s", prompt[:100])
 
     try:
@@ -925,6 +931,7 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
         output = f"""# Cron Job: {job_name}
 
 **Job ID:** {job_id}
+**Session ID:** {_cron_session_id}
 **Run Time:** {_hermes_now().strftime('%Y-%m-%d %H:%M:%S')}
 **Schedule:** {job.get('schedule_display', 'N/A')}
 
@@ -947,6 +954,7 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
         output = f"""# Cron Job: {job_name} (FAILED)
 
 **Job ID:** {job_id}
+**Session ID:** {_cron_session_id}
 **Run Time:** {_hermes_now().strftime('%Y-%m-%d %H:%M:%S')}
 **Schedule:** {job.get('schedule_display', 'N/A')}
 

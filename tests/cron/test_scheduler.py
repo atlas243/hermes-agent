@@ -283,12 +283,14 @@ class TestDeliverResultWrapping:
                 "name": "daily-report",
                 "deliver": "origin",
                 "origin": {"platform": "telegram", "chat_id": "123"},
+                "_last_session_id": "cron_test-job_20260427_160006",
             }
             _deliver_result(job, "Here is today's summary.")
 
         send_mock.assert_called_once()
         sent_content = send_mock.call_args.kwargs.get("content") or send_mock.call_args[0][-1]
         assert "Cronjob Response: daily-report" in sent_content
+        assert "(session_id: cron_test-job_20260427_160006)" in sent_content
         assert "(job_id: test-job)" in sent_content
         assert "-------------" in sent_content
         assert "Here is today's summary." in sent_content
