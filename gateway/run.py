@@ -563,6 +563,22 @@ def _resolve_timeout_config(
     return ceiling, idle
 
 
+def _resolve_timeout_config_for_chat(
+    user_config: dict,
+    chat_id: str | int | None,
+) -> tuple[float, float]:
+    """Resolve progress-aware timeout thresholds for a gateway chat.
+
+    This helper is intentionally independent of run_sync() locals.  The timeout
+    monitor is created in the outer async scope, while channel model/prompt
+    overrides are applied inside run_sync(); using a run_sync-local channel_cfg
+    from the monitor silently falls back to the global timeout.
+    """
+    channels = user_config.get("channels") or {}
+    channel_cfg = channels.get(str(chat_id or "")) or {}
+    return _resolve_timeout_config(user_config, channel_cfg)
+
+
 def _resolve_gateway_model(config: dict | None = None) -> str:
     """Read model from config.yaml — single source of truth.
 
@@ -9812,8 +9828,8 @@ class GatewayRunner:
         #   idle_threshold: kill after N seconds of no observable activity
         # The agent's _last_activity_ts is bumped on tool completions, API
         # responses, and streaming chunks.  Child-agent work propagates up.
-        _timeout_ceiling, _timeout_idle = _resolve_timeout_config(
-            user_config, _channel_cfg if '_channel_cfg' in dir() else {},
+        _timeout_ceiling, _timeout_idle = _resolve_timeout_config_for_chat(
+            user_config, getattr(source, "chat_id", None),
         )
 
         # Monitor for interrupts AND progress-aware timeout in one loop
