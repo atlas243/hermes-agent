@@ -1542,10 +1542,14 @@ class GatewayRunner:
         from gateway.platforms.base import merge_pending_message_event
         merge_pending_message_event(adapter._pending_messages, session_key, event)
 
-        # Interrupt the running agent — this aborts in-flight tool calls and
-        # causes the agent loop to exit at the next check point.
         running_agent = self._running_agents.get(session_key)
-        if running_agent and running_agent is not _AGENT_PENDING_SENTINEL:
+        queue_mode = getattr(self, "_busy_input_mode", "interrupt") == "queue"
+
+        # Interrupt mode preserves the historical behavior: abort the current
+        # run at its next checkpoint and process the new message next. Queue
+        # mode is useful for long-running channels where follow-up messages
+        # should not disrupt the in-flight task.
+        if not queue_mode and running_agent and running_agent is not _AGENT_PENDING_SENTINEL:
             try:
                 running_agent.interrupt(event.text)
             except Exception:
@@ -1582,10 +1586,16 @@ class GatewayRunner:
                 pass
 
         status_detail = f" ({', '.join(status_parts)})" if status_parts else ""
-        message = (
-            f"⚡ Interrupting current task{status_detail}. "
-            f"I'll respond to your message shortly."
-        )
+        if queue_mode:
+            message = (
+                f"⏳ Current task is still running{status_detail}. "
+                f"Queued your latest message; I'll handle it after this task finishes."
+            )
+        else:
+            message = (
+                f"⚡ Interrupting current task{status_detail}. "
+                f"I'll respond to your message shortly."
+            )
 
         thread_meta = {"thread_id": event.source.thread_id} if event.source.thread_id else None
         try:
