@@ -324,3 +324,26 @@ class TestBusySessionAck:
 
         result = await runner._handle_active_session_busy_message(event, sk)
         assert result is False  # not handled, let default path try
+
+    @pytest.mark.asyncio
+    async def test_stop_clears_stale_adapter_active_session_without_running_agent(self):
+        """/stop should unlock stale adapter state even when no runner agent exists."""
+        runner, sentinel = _make_runner()
+        adapter = _make_adapter()
+        adapter._active_sessions = {}
+        adapter._pending_messages = {}
+
+        event = _make_event(text="/stop", chat_id="123")
+        sk = build_session_key(event.source)
+        adapter._active_sessions[sk] = asyncio.Event()
+        adapter._pending_messages[sk] = _make_event(text="queued follow-up", chat_id="123")
+        runner.adapters[event.source.platform] = adapter
+        runner.session_store = MagicMock()
+        runner.session_store.get_or_create_session.return_value = MagicMock(session_key=sk)
+
+        result = await runner._handle_stop_command(event)
+
+        assert "No active task" not in result
+        assert sk not in adapter._active_sessions
+        assert sk not in adapter._pending_messages
+

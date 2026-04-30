@@ -4862,6 +4862,27 @@ class GatewayRunner:
             self._release_running_agent_state(session_key)
             return "⚡ Stopped. You can continue this session."
         else:
+            adapter = self.adapters.get(source.platform)
+            stale_active = False
+            stale_pending = False
+            if adapter:
+                active_sessions = getattr(adapter, "_active_sessions", None)
+                pending_messages = getattr(adapter, "_pending_messages", None)
+                if isinstance(active_sessions, dict) and session_key in active_sessions:
+                    active_sessions.pop(session_key, None)
+                    stale_active = True
+                if isinstance(pending_messages, dict) and session_key in pending_messages:
+                    pending_messages.pop(session_key, None)
+                    stale_pending = True
+            if stale_active or stale_pending:
+                logger.info(
+                    "STOP cleared stale adapter session state for %s "
+                    "(active=%s pending=%s)",
+                    session_key[:20],
+                    stale_active,
+                    stale_pending,
+                )
+                return "⚡ Cleared stale session lock. You can continue this session."
             return "No active task to stop."
 
     async def _handle_restart_command(self, event: MessageEvent) -> str:
